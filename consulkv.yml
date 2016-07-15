@@ -1,0 +1,11 @@
+environments:
+  - name: local
+    backup_path: /tmp/consul-backup.json
+    api_host: localhost
+    # api_port: 8500
+    # api_scheme: http
+    # api_token:
+  - name: prod
+    backup_path: /path/to/prod/consul-backup.json
+    api_host: 10.2.2.10
+    api_token: secret2

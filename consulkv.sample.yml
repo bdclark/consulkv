@@ -1,9 +1,0 @@
-environments:
-  - name: staging
-    backup_path: /path/to/staging/consul-backup.json
-    api_host: 10.1.1.10
-    api_token: secret1
-  - name: prod
-    backup_path: /path/to/prod/consul-backup.json
-    api_host: 10.2.2.10
-    api_token: secret2

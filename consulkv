@@ -93,8 +93,8 @@ def kv_ls(consul, show_long=False):
 parser = argparse.ArgumentParser()
 parser.add_argument(
     '--config-file', metavar='PATH',
-    default="{}/consulkv.yml".format(os.path.dirname(os.path.realpath(__file__))),
-    help='config file path (default is $PATH/consulkv.yml)')
+    default="{}/consulkv.yml".format(os.path.expanduser('~')),
+    help='config file path (default is $HOME/consulkv.yml)')
 
 subparsers = parser.add_subparsers(dest='command')
 parser_show = subparsers.add_parser(
@@ -149,8 +149,11 @@ parser_sync.add_argument(
 
 args = parser.parse_args()
 
-with open(args.config_file, 'r') as ymlfile:
-    config = yaml.safe_load(ymlfile)
+try:
+    with open(args.config_file, 'r') as ymlfile:
+        config = yaml.safe_load(ymlfile)
+except IOError as e:
+    sys.exit("Unable to load config file: {}".format(args.config_file))
 
 if args.command == 'ls':
     keys = set()
