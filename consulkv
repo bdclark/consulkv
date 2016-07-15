@@ -1,0 +1,279 @@
+#!/usr/bin/env python
+
+import json
+import yaml
+import base64
+import consulate
+from tabulate import tabulate
+import argparse
+import os
+import sys
+
+PYTHON3 = True if sys.version_info > (3, 0, 0) else False
+
+
+def environments_from_config(config, environments=None):
+    if environments is None:
+        return config['environments']
+    else:
+        envs = []
+        for env in config['environments']:
+            if env['name'] in environments:
+                envs.append(env)
+        return envs
+
+
+def consul_client(env):
+    params = {'host': env['api_host']}
+    if 'api_port' in env and env['api_port'] is not None:
+        params['port'] = env['api_port']
+    if 'api_token' in env and env['api_token'] is not None:
+        params['token'] = env['api_token']
+    if 'api_scheme' in env and env['api_scheme'] is not None:
+        params['scheme'] = env['api_scheme']
+    return consulate.Consul(**params)
+
+
+def maybe_encode(value):
+    """If the value passed in is a str, encode it as UTF-8 bytes for Python 3
+    :param str|bytes value: The value to maybe encode
+    :rtype: bytes
+    """
+    try:
+        return value.encode('utf-8')
+    except AttributeError:
+        return value
+
+
+def kv_backup(consul, path, base64_encode=False):
+    with open(path, 'w') as backup_file:
+        records = consul.kv.records()
+        if base64_encode:
+            if PYTHON3:
+                records = [(k, f, str(base64.b64encode(maybe_encode(v)),
+                                      'ascii'))
+                           for k, f, v in records]
+            else:
+                records = [(k, f, base64.b64encode(v) if v else v)
+                           for k, f, v in records]
+
+        backup_file.write(json.dumps(records, sort_keys=True, indent=2,
+                                     separators=(',', ': ')) + '\n')
+
+
+def kv_restore(consul, path, replace=True, base64_encoded=False):
+    with open(path, 'r') as restore_file:
+        data = json.load(restore_file)
+    for row in data:
+        if isinstance(row, dict):
+            # translate raw api export to internal representation
+            if row['Value'] is not None:
+                row['Value'] = base64.b64decode(row['Value'])
+            row = [row['Key'], row['Flags'], row['Value']]
+        if base64_encoded and row[2] is not None:
+            row[2] = base64.b64decode(row[2])
+        # Here's an awesome thing to make things work
+        if not PYTHON3 and isinstance(row[2], unicode):
+            row[2] = row[2].encode('utf-8')
+        consul.kv.set_record(row[0], row[1], row[2], replace)
+
+
+def kv_ls(consul, show_long=False):
+    keys = set()
+    for key in consul.kv.keys():
+        if show_long:
+            keylen = 0
+            if consul.kv[key]:
+                keylen = len(consul.kv[key])
+            print('{0:>14} {1}'.format(keylen, key))
+        else:
+            print(key)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    '--config-file', metavar='PATH',
+    default="{}/consulkv.yml".format(os.path.dirname(os.path.realpath(__file__))),
+    help='config file path (default is $PATH/consulkv.yml)')
+
+subparsers = parser.add_subparsers(dest='command')
+parser_show = subparsers.add_parser(
+    'show', help='Show Consul K/V store(s)')
+parser_show.add_argument(
+    '--prefix', help='key prefix to filter by')
+parser_show.add_argument(
+    '--suffix', help='key suffix to filter by')
+parser_show.add_argument(
+    '--contains', help='only include keys containing a string')
+parser_show.add_argument(
+    '--out-of-sync', action='store_true',
+    help='only show keys where backup out-of-sync with API')
+parser_show.add_argument(
+    '--env', nargs='+', help='environments to include')
+
+parser_backup = subparsers.add_parser(
+    'backup', help='Backup Consul KV store(s)')
+parser_backup.add_argument(
+    '--env', nargs='+', help='environments to include')
+
+parser_restore = subparsers.add_parser(
+    'restore', help='Restore Consul KV store(s)')
+parser_restore.add_argument(
+    '--env', nargs='+', help='environments to include')
+
+parser_ls = subparsers.add_parser(
+    'ls', help='List Consul keys')
+parser_ls.add_argument(
+    '--env', nargs='+', help='environments to include')
+
+parser_set = subparsers.add_parser('set', help='Set a Consul key')
+parser_set.add_argument('key', help='Key to set')
+parser_set.add_argument('value', nargs='?', help='Value to set')
+parser_set.add_argument(
+    '--env', nargs='+', help='environments to include', required=True)
+
+parser_rm = subparsers.add_parser('rm', help='Delete a Consul key')
+parser_rm.add_argument('key', help='Key to delete')
+parser_rm.add_argument(
+    '--recurse', help='Recursively delete', action='store_true')
+parser_rm.add_argument(
+    '--env', nargs='+', help='environments to include', required=True)
+
+parser_sync = subparsers.add_parser(
+    'sync', help='Sync a Consul key between environments')
+parser_sync.add_argument('key', help='Key to sync')
+parser_sync.add_argument(
+    '--source', help='environment to sync from', required=True)
+parser_sync.add_argument(
+    '--dest', nargs='+', help='environments to sync to', required=True)
+
+args = parser.parse_args()
+
+with open(args.config_file, 'r') as ymlfile:
+    config = yaml.safe_load(ymlfile)
+
+if args.command == 'ls':
+    keys = set()
+    for env in environments_from_config(config, args.env):
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            keys.update(consul.kv.keys())
+    for key in sorted(keys):
+        print key
+
+elif args.command == 'set':
+    for env in environments_from_config(config, args.env):
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            consul.kv[args.key] = args.value
+
+elif args.command == 'sync':
+    source_env = environments_from_config(config, args.source)[0]
+    source_consul = consul_client(source_env)
+    try:
+        value = source_consul.kv[args.key]
+        for env in environments_from_config(config, args.dest):
+            consul = consul_client(env)
+            consul.kv[args.key] = value
+    except KeyError as e:
+        print e.message
+
+elif args.command == 'rm':
+    for env in environments_from_config(config, args.env):
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            consul.kv.delete(args.key, args.recurse)
+
+elif args.command == 'backup':
+    for env in environments_from_config(config, args.env):
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            kv_backup(consul, env['backup_path'])
+            print "Environment {0} backup saved to {1}".format(
+                env['name'], env['backup_path'])
+
+elif args.command == 'restore':
+    for env in environments_from_config(config, args.env):
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            kv_restore(consul, env['backup_path'])
+            print "Environment {0} restored from {1}".format(
+                env['name'], env['backup_path'])
+
+elif args.command == 'show':
+    backup_data = {}
+    api_data = {}
+    keys = set()
+    environments = environments_from_config(config, args.env)
+    for env in environments:
+        # get data from backup files
+        with open(env['backup_path']) as jf:
+            content = json.load(jf)
+            backup_data[env['name']] = {}
+            for row in content:
+                keys.add(row[0])
+                backup_data[env['name']][row[0]] = row[2]
+
+        # Get actual data from API
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            records = consul.kv.records()
+            api_data[env['name']] = {}
+            for row in records:
+                keys.add(row[0])
+                api_data[env['name']][row[0]] = row[2]
+
+    for key in sorted(keys):
+        if args.prefix and not key.startswith(args.prefix):
+            continue
+        if args.suffix and not key.endswith(args.suffix):
+            continue
+        if args.contains and args.contains not in key:
+            continue
+
+        key_out_of_sync = False
+        table = []
+        for env in environments:
+            env_name = env['name']
+            if env_name in backup_data:
+                if key in backup_data[env_name]:
+                    backup_value = backup_data[env_name][key]
+                    if backup_value is None:
+                        backup_value = '*NULL*'
+                    elif backup_value == '':
+                        backup_value = '*EMPTY*'
+                else:
+                    backup_value = None
+            else:
+                backup_value = '*N/A*'
+
+            if env_name in api_data:
+                if key in api_data[env_name]:
+                    live_value = api_data[env_name][key]
+                    if live_value is None:
+                        live_value = '*NULL*'
+                    elif live_value == '':
+                        live_value = '*EMPTY*'
+                else:
+                    live_value = None
+            else:
+                live_value = '*N/A*'
+
+            status = None
+            if env_name in api_data and live_value != backup_value:
+                key_out_of_sync = True
+                tr = ["**{0}**".format(env_name), backup_value, live_value]
+            else:
+                tr = [env_name, backup_value, live_value]
+            table.append(tr)
+
+        if args.out_of_sync and not key_out_of_sync:
+            continue
+
+        if key_out_of_sync:
+            print key + " - OUT OF SYNC"
+        else:
+            print key
+        headers = ['env', 'backup', 'live api']
+        print tabulate(table, headers=headers, tablefmt="psql")
+        print
