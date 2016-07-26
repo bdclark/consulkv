@@ -147,6 +147,15 @@ parser_sync.add_argument(
 parser_sync.add_argument(
     '--dest', nargs='+', help='environments to sync to', required=True)
 
+parser_diff = subparsers.add_parser(
+    'diff', help='Diff keys/values in 2 environments')
+parser_diff.add_argument('env1', help='first environment')
+parser_diff.add_argument('env2', help='second environment')
+parser_diff.add_argument('--prefix', help='key prefix to filter by')
+parser_diff.add_argument('--suffix', help='key suffix to filter by')
+parser_diff.add_argument('--contains', help='only keys containing string')
+parser_diff.add_argument('--wide', help='Print wide table', action='store_true')
+
 args = parser.parse_args()
 
 try:
@@ -202,6 +211,53 @@ elif args.command == 'restore':
             kv_restore(consul, env['backup_path'])
             print "Environment {0} restored from {1}".format(
                 env['name'], env['backup_path'])
+
+elif args.command == 'diff':
+    api_data = {}
+    keys = set()
+    environments = environments_from_config(config, [args.env1, args.env2])
+    for index, env in enumerate(environments):
+        if 'api_host' in env and env['api_host'] is not None:
+            consul = consul_client(env)
+            records = consul.kv.records()
+            api_data[index] = {}
+            for row in records:
+                keys.add(row[0])
+                api_data[index][row[0]] = row[2]
+
+    wide_table = []
+    for key in sorted(keys):
+        if args.prefix and not key.startswith(args.prefix):
+            continue
+        if args.suffix and not key.endswith(args.suffix):
+            continue
+        if args.contains and args.contains not in key:
+            continue
+
+        for index, env in enumerate(environments):
+            env_name = env['name']
+            if key in api_data[index]:
+                if api_data[index][key] is None:
+                    api_data[index][key] = '*NULL*'
+                elif api_data[index][key] == '':
+                    api_data[index][key] = '*EMPTY*'
+            else:
+                api_data[index][key] = '*N/A*'
+
+        if api_data[0][key] == api_data[1][key]:
+            continue
+
+        if args.wide:
+            wide_table.append([key, api_data[0][key], api_data[1][key]])
+        else:
+            table = [[api_data[0][key], api_data[1][key]]]
+            headers = [environments[0]['name'], environments[1]['name']]
+            print key
+            print tabulate(table, headers=headers, tablefmt='psql')
+            print
+    if args.wide and wide_table:
+        headers = ['key', environments[0]['name'], environments[1]['name']]
+        print tabulate(wide_table, headers=headers, tablefmt='psql')
 
 elif args.command == 'show':
     backup_data = {}
