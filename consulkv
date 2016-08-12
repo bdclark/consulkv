@@ -110,6 +110,8 @@ parser_show.add_argument(
     help='only show keys where backup out-of-sync with API')
 parser_show.add_argument(
     '--env', nargs='+', help='environments to include')
+parser_show.add_argument(
+    '--wide', help='Print wide table', action='store_true')
 
 parser_backup = subparsers.add_parser(
     'backup', help='Backup Consul KV store(s)')
@@ -264,6 +266,8 @@ elif args.command == 'show':
     api_data = {}
     keys = set()
     environments = environments_from_config(config, args.env)
+    if args.wide and len(environments) != 1:
+        sys.exit('exactly one --env is required with --wide option')
     for env in environments:
         # get data from backup files
         with open(env['backup_path']) as jf:
@@ -282,6 +286,7 @@ elif args.command == 'show':
                 keys.add(row[0])
                 api_data[env['name']][row[0]] = row[2]
 
+    wide_table = []
     for key in sorted(keys):
         if args.prefix and not key.startswith(args.prefix):
             continue
@@ -329,10 +334,17 @@ elif args.command == 'show':
         if args.out_of_sync and not key_out_of_sync:
             continue
 
-        if key_out_of_sync:
-            print key + " - OUT OF SYNC"
+        if args.wide:
+            print_key = "**{0}**".format(key) if key_out_of_sync else key
+            wide_table.append([print_key, backup_value, live_value])
         else:
-            print key
-        headers = ['env', 'backup', 'live api']
-        print tabulate(table, headers=headers, tablefmt="psql")
-        print
+            if key_out_of_sync:
+                print key + " - OUT OF SYNC"
+            else:
+                print key
+            headers = ['env', 'backup', 'live api']
+            print tabulate(table, headers=headers, tablefmt="psql")
+            print
+    if args.wide and wide_table:
+        headers = ['key', 'backup', 'live api']
+        print tabulate(wide_table, headers=headers, tablefmt='psql')
